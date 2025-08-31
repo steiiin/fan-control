@@ -1,45 +1,27 @@
-# Set minimum CMake version.
 cmake_minimum_required(VERSION 3.17)
 
-# Create project.
-project(ClevoFanControl C)
+project(FanControl LANGUAGES C)
 
-# Enable the language standard.
+# C standard
 set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# Explicitly link the math library.
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -lm")
+# Warnings (optional but recommended)
+add_compile_options(-Wall -Wextra -Wpedantic)
 
-# Add the main executable.
-add_executable(clevo-fan-control src/main.c)
+# Main executable
+add_executable(fan-control src/main.c)
 
-# Use the package PkgConfig to detect dependencies.
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(APPINDICATOR REQUIRED appindicator3-0.1)
-pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
+# Link libm the modern CMake way (instead of stuffing -lm into C flags)
+target_link_libraries(fan-control PRIVATE m)
 
-# Include the dependencies.
-include_directories(${APPINDICATOR_INCLUDE_DIRS})
-include_directories(${GTK3_INCLUDE_DIRS})
-link_directories(${GTK3_LIBRARY_DIRS})
-
-# Add other flags to the compiler
-add_definitions(${GTK3_CFLAGS_OTHER})
-
-# Link the target to the dependencies.
-target_link_libraries(clevo-fan-control ${APPINDICATOR_LIBRARIES} ${GTK3_LIBRARIES})
-
-# Specify installation rules.
+# Install rules
+include(GNUInstallDirs)
 install(
-        TARGETS clevo-fan-control
-        PERMISSIONS WORLD_EXECUTE OWNER_WRITE OWNER_READ SETUID GROUP_EXECUTE
-        DESTINATION bin
-)
-install(
-        FILES src/clevo-fan-control.desktop
-        PERMISSIONS WORLD_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE
-        DESTINATION ~/.config/autostart
-)
-install (
-        CODE "execute_process(COMMAND sudo chown ${USER}:${GROUP} ${HOME}/.config/autostart/clevo-fan-control.desktop)"
+  TARGETS fan-control
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  # Typical executable permissions: 755 (owner rwx, group rx, world rx)
+  PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+              GROUP_READ GROUP_EXECUTE
+              WORLD_READ WORLD_EXECUTE
 )
