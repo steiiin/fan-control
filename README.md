@@ -15,3 +15,42 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 cmake --install build --prefix "$HOME/.local"
 ```
+
+fan-control will be installed in "~/.local/bin/fan-control".
+You'll need "sudo fan-control" to access the EC.
+
+## Using it
+
+```
+Usage: fan-cli <command>
+Commands:
+  set  <0..100>   Set BOTH fans
+  set1 <0..100>   Set CPU fan
+  set2 <0..100>   Set GPU fan
+  dump            Show CPU/GPU temps and fan status
+  auto            Auto mode (independent control)
+```
+
+## Service
+
+To start the auto-mode on startup create a new ".service"-file:
+
+
+```
+/etc/systemd/system/fan-control.service
+```
+```
+[Unit]
+Description=Fan Control Gigabyte
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/home/XXXXX/.local/bin/fan-control auto
+Restart=on-failure
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+Replace XXXXX with your own user.
