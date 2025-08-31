@@ -77,9 +77,7 @@ static int   cmd_set2(int pct);
 static int   cmd_auto(void);
 
 static int   clamp(int v, int lo, int hi);
-static int   map_temp_to_duty(int temp_c);
 static int   rpm_from_raw(int hi, int lo);
-static int   read_int_from_file(const char *path);
 static int   path_exists(const char *path);
 static int   gpu_temp_sysfs(void);
 static int   gpu_temp_nvidia_smi(void);
@@ -353,20 +351,6 @@ static int clamp(int v, int lo, int hi) {
     return v;
 }
 
-/* Map temperature (°C) to duty (%) with a simple linear curve. */
-static int map_temp_to_duty(int temp_c) {
-
-    if (temp_c < AUTO_MIN_TEMP_C) return 0;
-    if (temp_c >= AUTO_MAX_TEMP_C) return 100;
-
-    double x0 = (double)AUTO_MIN_TEMP_C, y0 = (double)MIN_FAN_DUTY_PCT;
-    double x1 = (double)AUTO_MAX_TEMP_C, y1 = 100.0;
-    double duty = y0 + (y1 - y0) * ((temp_c - x0) / (x1 - x0));
-    int pct = (int)(duty + 0.5);
-    return clamp(pct, 0, 100);
-
-}
-
 /* Convert EC raw RPM value (two bytes) to RPM.
    The original project used: RPM = 2156220 / raw */
 static int rpm_from_raw(int hi, int lo) {
@@ -381,40 +365,57 @@ static int gpu_temp_sysfs(void) {
     DIR *d = opendir("/sys/class/hwmon");
     if (!d) return -1;
 
-    struct dirent *de;
     int best = -1;
+    int rootfd = dirfd(d);
+    if (rootfd < 0) { closedir(d); return -1; }
+
+    struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         if (strncmp(de->d_name, "hwmon", 5) != 0) continue;
 
-        char base[256];
-        snprintf(base, sizeof(base), "/sys/class/hwmon/%s", de->d_name);
+        int hwfd = openat(rootfd, de->d_name, O_RDONLY | O_DIRECTORY);
+        if (hwfd < 0) continue;
 
-        char namepath[300];
-        snprintf(namepath, sizeof(namepath), "%s/name", base);
-        int fd = open(namepath, O_RDONLY);
-        if (fd < 0) continue;
+        /* Read "<hwmon>/name" */
+        int namefd = openat(hwfd, "name", O_RDONLY);
+        if (namefd < 0) { close(hwfd); continue; }
 
         char namebuf[64] = {0};
-        ssize_t n = read(fd, namebuf, sizeof(namebuf) - 1);
-        close(fd);
-        if (n <= 0) continue;
+        ssize_t n = read(namefd, namebuf, sizeof(namebuf) - 1);
+        close(namefd);
+        if (n <= 0) { close(hwfd); continue; }
         for (ssize_t i = 0; i < n; i++) if (namebuf[i] == '\n') { namebuf[i] = 0; break; }
 
-        if (strstr(namebuf, "nvidia") || strstr(namebuf, "amdgpu") ||
-            strstr(namebuf, "i915")   || strstr(namebuf, "xe")) {
+        if (!(strstr(namebuf, "nvidia") || strstr(namebuf, "amdgpu") ||
+              strstr(namebuf, "i915")   || strstr(namebuf, "xe"))) {
+            close(hwfd);
+            continue;
+        }
 
-            for (int i = 1; i <= 10; i++) {
-                char tpath[320];
-                snprintf(tpath, sizeof(tpath), "%s/temp%d_input", base, i);
-                if (!path_exists(tpath)) continue;
-                int milli = read_int_from_file(tpath);
-                if (milli > 0) {
-                    int c = milli / 1000; /* millidegC -> C */
-                    if (c > best) best = c; /* choose hottest temp as GPU temp */
-                }
+        /* Try temp1_input .. temp10_input */
+        for (int i = 1; i <= 10; i++) {
+            char fn[32];
+            int m = snprintf(fn, sizeof(fn), "temp%d_input", i);
+            if (m < 0 || (size_t)m >= sizeof(fn)) continue;
+
+            int tfd = openat(hwfd, fn, O_RDONLY);
+            if (tfd < 0) continue;
+
+            char buf[32] = {0};
+            ssize_t r = read(tfd, buf, sizeof(buf) - 1);
+            close(tfd);
+            if (r <= 0) continue;
+
+            int milli = atoi(buf);          /* millidegC */
+            if (milli > 0) {
+                int c = milli / 1000;       /* °C */
+                if (c > best) best = c;     /* pick the hottest as GPU temp */
             }
         }
+
+        close(hwfd);
     }
+
     closedir(d);
     return best;
 }
@@ -433,13 +434,4 @@ static int gpu_temp_nvidia_smi(void) {
 }
 
 /* Small helpers */
-static int read_int_from_file(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
-    char buf[64] = {0};
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0) return -1;
-    return atoi(buf);
-}
 static int path_exists(const char *path) { return access(path, F_OK) == 0; }
