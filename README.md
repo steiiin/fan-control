@@ -13,11 +13,19 @@ I don't know, if it work anywhere else - or damage anything else.
 ```
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
+sudo cmake --install build
+```
+You'll need "sudo" to access the EC.
+
+---
+
+You can install it only for your user, but "sudo" is later
+nethertheless necessary - and needs the absolute path:
+```
 cmake --install build --prefix "$HOME/.local"
 ```
-
 fan-control will be installed in "~/.local/bin/fan-control".
-You'll need "sudo fan-control" to access the EC.
+
 
 ## Using it
 
@@ -46,11 +54,10 @@ After=multi-user.target
 
 [Service]
 Type=simple
-ExecStart=/home/XXXXX/.local/bin/fan-control auto
+ExecStart=/usr/local/bin/fan-control auto
 Restart=on-failure
 User=root
 
 [Install]
 WantedBy=multi-user.target
 ```
-Replace XXXXX with your own user.
