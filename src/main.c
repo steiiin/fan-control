@@ -54,11 +54,19 @@
 #define MIN_DEADBAND_C        2      /* hysteresis around AUTO_MIN_TEMP_C */
 #define STEP_PCT              2      /* % per iteration (400 ms) */
 
+/* --- Plausibility rules --- */
+#define TEMP_MIN_VALID_C      10     /* below this we assume "sensor bad" */
+#define TEMP_MAX_VALID_C      110    /* above this we assume "sensor bad" */
+#define GPU_CPU_MAX_DIFF_C     40    /* GPU must be within +/-40°C of CPU to be trusted */
+
 /* --- Prototypes --- */
 static int   ec_init(void);
 static int   ec_io_wait(const uint32_t port, const uint32_t flag, const char value);
 static uint8_t ec_io_read(const uint32_t port);
 static int   ec_io_do(const uint32_t cmd, const uint32_t port, const uint8_t value);
+
+static int   is_temp_plausible(int t);
+static int   sanitize_gpu_temp(int gpu_c, int cpu_c);
 
 static int   cpu_temp_ec(void);
 static int   gpu_temp(void);         /* driver (sysfs/nvidia-smi) first, then EC fallback */
@@ -142,7 +150,8 @@ int main(int argc, char *argv[]) {
 
 static int dump_status(void) {
     int tc = cpu_temp_ec();
-    int tg = gpu_temp();  /* may come from driver; EC fallback if needed */
+    int tg_raw = gpu_temp();
+    int tg = sanitize_gpu_temp(tg_raw, tc);
 
     int d1 = fan1_duty_read();
     int r1 = fan1_rpm_read();
@@ -150,10 +159,20 @@ static int dump_status(void) {
     int d2 = fan2_duty_read();
     int r2 = fan2_rpm_read();
 
-    printf("CPU: %d°C - Fan: %d%% %dRPM\n", tc, d1, r1);
-    printf("GPU: %d°C - Fan: %d%% %dRPM\n", tg, d2, r2);
+    if (!is_temp_plausible(tc)) {
+        printf("CPU: %d°C (INVALID) - Fan: %d%% %dRPM\n", tc, d1, r1);
+    } else {
+        printf("CPU: %d°C - Fan: %d%% %dRPM\n", tc, d1, r1);
+    }
+
+    if (tg >= 0) {
+        printf("GPU: %d°C - Fan: %d%% %dRPM\n", tg, d2, r2);
+    } else {
+        printf("GPU: ignored (%d°C raw) - Fan: %d%% %dRPM\n", tg_raw, d2, r2);
+    }
     return 0;
 }
+
 
 static int cmd_set_both(int pct) {
     if (pct < 0 || pct > 100) { fprintf(stderr, "Duty must be 0..100\n"); return EXIT_FAILURE; }
@@ -215,15 +234,36 @@ static int cmd_auto(void) {
     int last = clamp(fan1_duty_read(), 0, 100);
     fan2_duty_write(last); // keep both fans in sync at start
 
-    printf("Auto mode (hotter-of CPU/GPU) running (Ctrl+C to stop)\n");
+    printf("Auto mode (hotter-of CPU/GPU, with plausibility checks) running (Ctrl+C to stop)\n");
     while (!g_stop) {
         int tc = cpu_temp_ec();
-        int tg = gpu_temp();
-        int th = (tc > tg) ? tc : tg;  // ***only the hotter temp***
+        int tg_raw = gpu_temp();
+
+        /* Safety first: CPU must be plausible. If not, go full blast. */
+        if (!is_temp_plausible(tc)) {
+            if (last != 100) {
+                fan1_duty_write(100);
+                fan2_duty_write(100);
+                last = 100;
+            }
+            int r1s = fan1_rpm_read();
+            int r2s = fan2_rpm_read();
+            printf("CPU=%d°C (INVALID)  GPU=%d°C  -> Duty=100%%  (F1=%d RPM, F2=%d RPM)    \r",
+                   tc, tg_raw, r1s, r2s);
+            fflush(stdout);
+            usleep(1000 * 1000);
+            continue; /* try again next cycle */
+        }
+
+        /* GPU is optional: ignore if implausible or too far from CPU */
+        int tg = sanitize_gpu_temp(tg_raw, tc);
+
+        /* Hotter-of (with GPU possibly ignored) */
+        int th = (tg >= 0) ? ((tc > tg) ? tc : tg) : tc;
 
         int target = target_duty_from_temp_hot(th, last);
 
-        // Safety: if we're already at/above MAX_TEMP, jump straight to 100%
+        /* Safety: immediate 100% if at/above AUTO_MAX_TEMP_C */
         int newduty = (th >= AUTO_MAX_TEMP_C) ? 100 : step_toward(last, target);
         newduty = clamp(newduty, 0, 100);
 
@@ -236,15 +276,32 @@ static int cmd_auto(void) {
         int r1 = fan1_rpm_read();
         int r2 = fan2_rpm_read();
 
-        printf("CPU=%d°C  GPU=%d°C  HOT=%d°C  -> Duty=%d%%  (F1=%d RPM, F2=%d RPM)    \r",
-               tc, tg, th, newduty, r1, r2);
+        if (tg >= 0) {
+            printf("CPU=%d°C  GPU=%d°C  HOT=%d°C  -> Duty=%d%%  (F1=%d RPM, F2=%d RPM)    \r",
+                   tc, tg, th, newduty, r1, r2);
+        } else {
+            printf("CPU=%d°C  GPU=IGNORED(%d°C)  HOT=%d°C  -> Duty=%d%%  (F1=%d RPM, F2=%d RPM)    \r",
+                   tc, tg_raw, th, newduty, r1, r2);
+        }
         fflush(stdout);
 
         usleep(1000 * 1000); // 1000 ms
-
     }
     printf("\nStopped.\n");
     return 0;
+}
+
+static int is_temp_plausible(int t) {
+    return (t >= TEMP_MIN_VALID_C && t <= TEMP_MAX_VALID_C);
+}
+
+/* Return -1 if GPU reading should be ignored (out-of-range or too far from CPU) */
+static int sanitize_gpu_temp(int gpu_c, int cpu_c) {
+    if (!is_temp_plausible(gpu_c)) return -1;                 /* GPU clearly bogus */
+    if (is_temp_plausible(cpu_c)) {
+        if (abs(gpu_c - cpu_c) > GPU_CPU_MAX_DIFF_C) return -1;  /* not near CPU => ignore */
+    }
+    return gpu_c;
 }
 
 /* ---------------------- EC access ----------------------- */
