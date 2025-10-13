@@ -46,7 +46,6 @@
 #define EC_REG_FAN2_RPM_LO    0xD3
 
 /* --- Conversions / curve params --- */
-#define MAX_FAN_RPM           4400.0
 #define MIN_FAN_DUTY_PCT      20     /* lower end % - anything below 16% and the fan will not start sometimes */
 #define AUTO_MIN_TEMP_C       40     /* run fan above this */
 #define AUTO_MAX_TEMP_C       80     /* 100% at/above this */
@@ -68,7 +67,7 @@ static int   ec_io_do(const uint32_t cmd, const uint32_t port, const uint8_t val
 static int   is_temp_plausible(int t);
 static int   sanitize_gpu_temp(int gpu_c, int cpu_c);
 
-static int   cpu_temp_ec(void);
+static int   cpu_temp(void);
 static int   gpu_temp(void);         /* driver (sysfs/nvidia-smi) first, then EC fallback */
 
 static int   fan1_duty_read(void);
@@ -84,6 +83,8 @@ static int   cmd_set1(int pct);
 static int   cmd_set2(int pct);
 static int   cmd_auto(void);
 
+static int   target_duty_from_avg_temp(int t_avg_c);
+static int   step_from_avg_temp(int t_avg_c);
 static int   clamp(int v, int lo, int hi);
 static int   rpm_from_raw(int hi, int lo);
 static int   path_exists(const char *path);
@@ -149,7 +150,7 @@ int main(int argc, char *argv[]) {
 /* ---------------------- Commands ------------------------ */
 
 static int dump_status(void) {
-    int tc = cpu_temp_ec();
+    int tc = cpu_temp();
     int tg_raw = gpu_temp();
     int tg = sanitize_gpu_temp(tg_raw, tc);
 
@@ -196,97 +197,130 @@ static int cmd_set2(int pct) {
     return dump_status();
 }
 
-static int target_duty_from_temp_hot(int temp_c, int prev_pct)
-{
-    // Hard max: immediate full speed for safety
-    if (temp_c >= AUTO_MAX_TEMP_C) return 100;
+static int target_duty_from_avg_temp(int temp_c) {
+    const struct { int t; int p; } points[] = {
+        {45, 20},
+        {55, 30},
+        {60, 40},
+        {70, 50},
+        {80, 70},
+        {85, 100}
+    };
+    const int n = sizeof(points) / sizeof(points[0]);
 
-    // Hysteresis around AUTO_MIN_TEMP_C: keep off until clearly above; turn off only when clearly below
-    const int on_thr  = AUTO_MIN_TEMP_C + MIN_DEADBAND_C;
-    const int off_thr = AUTO_MIN_TEMP_C - MIN_DEADBAND_C;
+    /* Edge cases */
+    if (temp_c <= points[0].t)
+        return points[0].p;
+    if (temp_c >= points[n - 1].t)
+        return points[n - 1].p;
 
-    if (prev_pct == 0) {
-        if (temp_c <= on_thr) return 0;              // remain off until comfortably above min
-    } else {
-        if (temp_c < off_thr) return 0;              // turn off only when comfortably below min
+    /* Linear interpolation */
+    for (int i = 0; i < n - 1; i++) {
+        int t1 = points[i].t, p1 = points[i].p;
+        int t2 = points[i + 1].t, p2 = points[i + 1].p;
+        if (temp_c >= t1 && temp_c < t2) {
+            double fraction = (double)(temp_c - t1) / (double)(t2 - t1);
+            double percentage = p1 + (p2 - p1) * fraction;
+            return (int)(percentage + 0.5);
+        }
     }
 
-    // Linear middle: MIN temp -> MIN duty, MAX temp -> 100% (using your variables)
-    if (temp_c <= AUTO_MIN_TEMP_C) return MIN_FAN_DUTY_PCT;
-
-    double x0 = (double)AUTO_MIN_TEMP_C, y0 = (double)MIN_FAN_DUTY_PCT;
-    double x1 = (double)AUTO_MAX_TEMP_C, y1 = 100.0;
-    double duty = y0 + (y1 - y0) * ((temp_c - x0) / (x1 - x0));
-    int pct = (int)(duty + 0.5);
-    return clamp(pct, 0, 100);
+    return 100; /* fallback */
 }
 
-static inline int step_toward(int last_pct, int target_pct)
-{
-    int delta = target_pct - last_pct;
-    if (delta > 0)       return last_pct + (delta < STEP_PCT ? delta : STEP_PCT);
-    else if (delta < 0)  return last_pct - ((-delta) < STEP_PCT ? -delta : STEP_PCT);
-    else                 return last_pct;
+static int step_from_avg_temp(int t_avg_c) {
+    if (t_avg_c < 70) return 1;
+    if (t_avg_c < 80) return 2;
+    return 4;
 }
+
 
 static int cmd_auto(void) {
 
-    int last = clamp(fan1_duty_read(), 0, 100);
-    fan2_duty_write(last); // keep both fans in sync at start
+    /* ring buffer of last 3 "hot" temps (hotter-of CPU/GPU), initialized lazily */
+    int ring[3] = { -1, -1, -1 };
+    int idx = 0, filled = 0;
 
-    printf("Auto mode (hotter-of CPU/GPU, with plausibility checks) running (Ctrl+C to stop)\n");
+    /* start at 40% as requested and sync both fans */
+    int current = 40;
+    fan1_duty_write(current);
+    fan2_duty_write(current);
+
+    printf("Auto mode running (Ctrl+C to stop)\n");
+
     while (!g_stop) {
-        int tc = cpu_temp_ec();
+
+        int tc = cpu_temp();
         int tg_raw = gpu_temp();
 
-        /* Safety first: CPU must be plausible. If not, go full blast. */
+        /* Safety: if CPU temp implausible, full fan speed */
         if (!is_temp_plausible(tc)) {
-            if (last != 100) {
+            if (current != 100) {
                 fan1_duty_write(100);
                 fan2_duty_write(100);
-                last = 100;
+                current = 100;
             }
+
             int r1s = fan1_rpm_read();
             int r2s = fan2_rpm_read();
             printf("CPU=%d°C (INVALID)  GPU=%d°C  -> Duty=100%%  (F1=%d RPM, F2=%d RPM)    \r",
                    tc, tg_raw, r1s, r2s);
             fflush(stdout);
             usleep(1000 * 1000);
-            continue; /* try again next cycle */
+            continue;
         }
 
-        /* GPU is optional: ignore if implausible or too far from CPU */
+        /* GPU optional, sanitize; choose hotter-of */
         int tg = sanitize_gpu_temp(tg_raw, tc);
-
-        /* Hotter-of (with GPU possibly ignored) */
         int th = (tg >= 0) ? ((tc > tg) ? tc : tg) : tc;
 
-        int target = target_duty_from_temp_hot(th, last);
+        /* update ring buffer for 3-second floating average */
+        ring[idx] = th;
+        idx = (idx + 1) % 3;
+        if (filled < 3) filled++;
 
-        /* Safety: immediate 100% if at/above AUTO_MAX_TEMP_C */
-        int newduty = (th >= AUTO_MAX_TEMP_C) ? 100 : step_toward(last, target);
-        newduty = clamp(newduty, 0, 100);
+        /* compute average over available samples (1..3) */
+        int sum = 0;
+        for (int i = 0; i < filled; i++) sum += ring[i];
+        int t_avg = sum / filled;
 
-        if (newduty != last) {
+        /* step and target from averaged temp */
+        int step = step_from_avg_temp(t_avg);
+        int target = target_duty_from_avg_temp(t_avg);
+
+        /* change fan speed, except diff(target/current) < step */
+        int diff = target - current;
+        int newduty = current;
+        if (diff>0) {
+            newduty = (diff >= step) ? current + step : target;
+        }
+        else if (diff<0) {
+            newduty = current - 1;
+        }
+        newduty = clamp(newduty, 20, 100);
+
+        if (newduty != current) {
             fan1_duty_write(newduty);
             fan2_duty_write(newduty);
-            last = newduty;
+            current = newduty;
         }
 
         int r1 = fan1_rpm_read();
         int r2 = fan2_rpm_read();
 
         if (tg >= 0) {
-            printf("CPU=%d°C  GPU=%d°C  HOT=%d°C  -> Duty=%d%%  (F1=%d RPM, F2=%d RPM)    \r",
-                   tc, tg, th, newduty, r1, r2);
+            printf("CPU=%d°C  GPU=%d°C  HOT=%d°C  AVG3=%d°C  STEP=%d  TARGET=%d%%  -> Duty=%d%%  (F1=%d RPM, F2=%d RPM)    \r",
+                   tc, tg, th, t_avg, step, target, current, r1, r2);
         } else {
-            printf("CPU=%d°C  GPU=IGNORED(%d°C)  HOT=%d°C  -> Duty=%d%%  (F1=%d RPM, F2=%d RPM)    \r",
-                   tc, tg_raw, th, newduty, r1, r2);
+            printf("CPU=%d°C  GPU=IGNORED(%d°C)  HOT=%d°C  AVG3=%d°C  STEP=%d  TARGET=%d%%  -> Duty=%d%%  (F1=%d RPM, F2=%d RPM)    \r",
+                   tc, tg_raw, th, t_avg, step, target, current, r1, r2);
         }
         fflush(stdout);
 
-        usleep(1000 * 1000); // 1000 ms
+        usleep(1000 * 1000); /* 1 Hz loop */
+
     }
+
     printf("\nStopped.\n");
     return 0;
 }
@@ -295,7 +329,6 @@ static int is_temp_plausible(int t) {
     return (t >= TEMP_MIN_VALID_C && t <= TEMP_MAX_VALID_C);
 }
 
-/* Return -1 if GPU reading should be ignored (out-of-range or too far from CPU) */
 static int sanitize_gpu_temp(int gpu_c, int cpu_c) {
     if (!is_temp_plausible(gpu_c)) return -1;                 /* GPU clearly bogus */
     if (is_temp_plausible(cpu_c)) {
@@ -348,8 +381,7 @@ static int ec_io_do(const uint32_t cmd, const uint32_t port, const uint8_t value
 
 /* ------------------- Sensing helpers -------------------- */
 
-static int cpu_temp_ec(void) {
-    /* EC CPU temp in °C */
+static int cpu_temp(void) {
     return (int)ec_io_read(EC_REG_CPU_TEMP);
 }
 
@@ -388,7 +420,7 @@ static int fan2_rpm_read(void) {
     return rpm_from_raw(hi, lo);
 }
 
-/* Fan duty write (0..100) via EC command 0x99; port 0x01=fan1, 0x02=fan2 */
+/* Fan duty write */
 static int fan1_duty_write(int pct) {
     pct = clamp(pct, 0, 100);
     int v = (int)(pct / 100.0 * 255.0 + 0.5);
@@ -408,8 +440,6 @@ static int clamp(int v, int lo, int hi) {
     return v;
 }
 
-/* Convert EC raw RPM value (two bytes) to RPM.
-   The original project used: RPM = 2156220 / raw */
 static int rpm_from_raw(int hi, int lo) {
     int raw = (hi << 8) | lo;
     return (raw > 0) ? (2156220 / raw) : 0;
