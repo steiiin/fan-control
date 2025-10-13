@@ -45,14 +45,6 @@
 #define EC_REG_FAN2_RPM_HI    0xD2
 #define EC_REG_FAN2_RPM_LO    0xD3
 
-/* --- Conversions / curve params --- */
-#define MIN_FAN_DUTY_PCT      20     /* lower end % - anything below 16% and the fan will not start sometimes */
-#define AUTO_MIN_TEMP_C       40     /* run fan above this */
-#define AUTO_MAX_TEMP_C       80     /* 100% at/above this */
-#define AUTO_MAX_STEP         5      /* max % change per cycle for smoothing */
-#define MIN_DEADBAND_C        2      /* hysteresis around AUTO_MIN_TEMP_C */
-#define STEP_PCT              2      /* % per iteration (400 ms) */
-
 /* --- Plausibility rules --- */
 #define TEMP_MIN_VALID_C      10     /* below this we assume "sensor bad" */
 #define TEMP_MAX_VALID_C      110    /* above this we assume "sensor bad" */
