@@ -6,7 +6,10 @@
  *   set1 <0..100>   - Set CPU (fan1/right) duty
  *   set2 <0..100>   - Set GPU (fan2/left) duty
  *   dump            - Show CPU/GPU temps and each fan's duty/RPM
- *   auto            - Auto mode: adjust EACH fan from its own temp (independent)
+ *   power           - Automatic control: 40% minimum, 100% target at 80°C
+ *   default         - Automatic control: original curve, 100% target at 85°C
+ *   silent          - Automatic control: 20% through 50°C, 100% target at 90°C
+ *   auto            - Alias for default; both fans follow averaged hotter temp
  *
  * DISCLAIMER: Direct EC access can be risky. You assume responsibility.
 
@@ -24,8 +27,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "fan_curve.h"
+
 /* --- Program name --- */
-#define NAME "fan-cli"
+#define NAME "fan-control"
 
 /* --- EC I/O ports and commands --- */
 #define EC_SC 0x66
@@ -73,9 +78,8 @@ static int   dump_status(void);
 static int   cmd_set_both(int pct);
 static int   cmd_set1(int pct);
 static int   cmd_set2(int pct);
-static int   cmd_auto(void);
+static int   cmd_auto(fan_mode mode);
 
-static int   target_duty_from_avg_temp(int t_avg_c);
 static int   step_from_avg_temp(int t_avg_c);
 static int   clamp(int v, int lo, int hi);
 static int   rpm_from_raw(int hi, int lo);
@@ -97,8 +101,25 @@ int main(int argc, char *argv[]) {
             "  set1 <0..100>   Set CPU fan\n"
             "  set2 <0..100>   Set GPU fan\n"
             "  dump            Show CPU/GPU temps and fan status\n"
-            "  auto            Auto mode (independent control)\n",
+            "  power           Automatic: 40%% minimum, 100%% target at 80°C\n"
+            "  default         Automatic: original curve, 100%% target at 85°C\n"
+            "  silent          Automatic: 20%% through 50°C, 100%% target at 90°C\n"
+            "  auto            Alias for default\n"
+            "Automatic modes synchronize both fans using the averaged hotter CPU/GPU temperature.\n",
             NAME);
+        return EXIT_FAILURE;
+    }
+
+    fan_mode mode = FAN_MODE_DEFAULT;
+    int automatic = fan_mode_from_command(argv[1], &mode);
+    if (automatic && argc != 2) {
+        fprintf(stderr, "Usage: %s %s\n", NAME, argv[1]);
+        return EXIT_FAILURE;
+    }
+    if (!automatic && strcmp(argv[1], "dump") != 0 &&
+        strcmp(argv[1], "set") != 0 && strcmp(argv[1], "set1") != 0 &&
+        strcmp(argv[1], "set2") != 0) {
+        fprintf(stderr, "Unknown command: %s\n", argv[1]);
         return EXIT_FAILURE;
     }
 
@@ -131,8 +152,8 @@ int main(int argc, char *argv[]) {
         return cmd_set2(pct);
     }
 
-    if (strcmp(argv[1], "auto") == 0) {
-        return cmd_auto();
+    if (automatic) {
+        return cmd_auto(mode);
     }
 
     fprintf(stderr, "Unknown command: %s\n", argv[1]);
@@ -189,37 +210,6 @@ static int cmd_set2(int pct) {
     return dump_status();
 }
 
-static int target_duty_from_avg_temp(int temp_c) {
-    const struct { int t; int p; } points[] = {
-        {45, 20},
-        {55, 30},
-        {60, 40},
-        {70, 50},
-        {80, 70},
-        {85, 100}
-    };
-    const int n = sizeof(points) / sizeof(points[0]);
-
-    /* Edge cases */
-    if (temp_c <= points[0].t)
-        return points[0].p;
-    if (temp_c >= points[n - 1].t)
-        return points[n - 1].p;
-
-    /* Linear interpolation */
-    for (int i = 0; i < n - 1; i++) {
-        int t1 = points[i].t, p1 = points[i].p;
-        int t2 = points[i + 1].t, p2 = points[i + 1].p;
-        if (temp_c >= t1 && temp_c < t2) {
-            double fraction = (double)(temp_c - t1) / (double)(t2 - t1);
-            double percentage = p1 + (p2 - p1) * fraction;
-            return (int)(percentage + 0.5);
-        }
-    }
-
-    return 100; /* fallback */
-}
-
 static int step_from_avg_temp(int t_avg_c) {
     if (t_avg_c < 70) return 1;
     if (t_avg_c < 80) return 2;
@@ -227,18 +217,19 @@ static int step_from_avg_temp(int t_avg_c) {
 }
 
 
-static int cmd_auto(void) {
+static int cmd_auto(fan_mode mode) {
 
     /* ring buffer of last 3 "hot" temps (hotter-of CPU/GPU), initialized lazily */
     int ring[3] = { -1, -1, -1 };
     int idx = 0, filled = 0;
 
-    /* start at 40% as requested and sync both fans */
-    int current = 40;
+    /* Start at the selected mode's duty and sync both fans. */
+    int current = fan_mode_startup_duty(mode);
+    int minimum = fan_mode_min_duty(mode);
     fan1_duty_write(current);
     fan2_duty_write(current);
 
-    printf("Auto mode running (Ctrl+C to stop)\n");
+    printf("Auto mode running: %s (Ctrl+C to stop)\n", fan_mode_name(mode));
 
     while (!g_stop) {
 
@@ -278,7 +269,7 @@ static int cmd_auto(void) {
 
         /* step and target from averaged temp */
         int step = step_from_avg_temp(t_avg);
-        int target = target_duty_from_avg_temp(t_avg);
+        int target = target_duty_from_avg_temp(mode, t_avg);
 
         /* change fan speed, except diff(target/current) < step */
         int diff = target - current;
@@ -289,7 +280,7 @@ static int cmd_auto(void) {
         else if (diff<0) {
             newduty = current - 1;
         }
-        newduty = clamp(newduty, 20, 100);
+        newduty = clamp(newduty, minimum, 100);
 
         if (newduty != current) {
             fan1_duty_write(newduty);
