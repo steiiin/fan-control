@@ -30,6 +30,7 @@
 #include "fan_curve.h"
 #include "fan_control.h"
 #include "system_load.h"
+#include "status.h"
 
 /* --- Program name --- */
 #define NAME "fan-control"
@@ -211,16 +212,6 @@ static int cmd_set2(int pct) {
     return dump_status();
 }
 
-static void print_load_status(double cpu, double gpu, double maximum, fan_mode profile) {
-    char cpu_text[32] = "N/A", gpu_text[32] = "N/A", max_text[32] = "N/A";
-    if (cpu >= 0) snprintf(cpu_text, sizeof(cpu_text), "%.2f%%", cpu);
-    if (gpu >= 0) snprintf(gpu_text, sizeof(gpu_text), "%.2f%%", gpu);
-    if (maximum >= 0) snprintf(max_text, sizeof(max_text), "%.2f%%", maximum);
-    printf("LOAD CPU=%s GPU=%s MAX=%s PROFILE=%s  ",
-           cpu_text, gpu_text, max_text, fan_mode_name(profile));
-}
-
-
 static int cmd_auto(fan_mode mode) {
 
     /* Start at the selected mode's duty and sync both fans. */
@@ -232,7 +223,8 @@ static int cmd_auto(fan_mode mode) {
     fan1_duty_write(current);
     fan2_duty_write(current);
 
-    printf("Auto mode running: %s (Ctrl+C to stop)\n", fan_mode_name(mode));
+    printf("Auto mode running: %s\n", fan_mode_name(mode));
+    fflush(stdout);
 
     while (!g_stop) {
 
@@ -255,14 +247,18 @@ static int cmd_auto(fan_mode mode) {
                 gpu_load = gpu_load_read();
                 max_load = system_load_max(cpu_load, gpu_load);
                 profile = fan_mode_from_load(max_load);
-                print_load_status(cpu_load, gpu_load, max_load, profile);
             }
 
             int r1s = fan1_rpm_read();
             int r2s = fan2_rpm_read();
-            printf("CPU=%d°C (INVALID)  GPU=%d°C  -> Duty=100%%  (F1=%d RPM, F2=%d RPM)    \r",
-                   tc, tg_raw, r1s, r2s);
-            fflush(stdout);
+            fan_status status = {
+                .mode = mode, .profile = profile,
+                .cpu_temp = tc, .cpu_valid = 0,
+                .gpu_temp = sanitize_gpu_temp(tg_raw, tc), .gpu_raw = tg_raw,
+                .cpu_load = cpu_load, .gpu_load = gpu_load, .max_load = max_load,
+                .duty = current, .rpm1 = r1s, .rpm2 = r2s
+            };
+            fan_status_publish(stdout, &status);
             usleep(1000 * 1000);
             continue;
         }
@@ -279,9 +275,6 @@ static int cmd_auto(fan_mode mode) {
         }
 
         fan_control_update(&control, profile, th);
-        int t_avg = control.average;
-        int step = control.step;
-        int target = control.target;
         int newduty = control.duty;
 
         if (newduty != current) {
@@ -293,22 +286,23 @@ static int cmd_auto(fan_mode mode) {
         int r1 = fan1_rpm_read();
         int r2 = fan2_rpm_read();
 
-        if (mode == FAN_MODE_AUTO)
-            print_load_status(cpu_load, gpu_load, max_load, profile);
-        if (tg >= 0) {
-            printf("CPU=%d°C  GPU=%d°C  HOT=%d°C  AVG3=%d°C  STEP=%d  TARGET=%d%%  -> Duty=%d%%  (F1=%d RPM, F2=%d RPM)    \r",
-                   tc, tg, th, t_avg, step, target, current, r1, r2);
-        } else {
-            printf("CPU=%d°C  GPU=IGNORED(%d°C)  HOT=%d°C  AVG3=%d°C  STEP=%d  TARGET=%d%%  -> Duty=%d%%  (F1=%d RPM, F2=%d RPM)    \r",
-                   tc, tg_raw, th, t_avg, step, target, current, r1, r2);
-        }
-        fflush(stdout);
+        fan_status status = {
+            .mode = mode, .profile = profile,
+            .cpu_temp = tc, .cpu_valid = 1, .gpu_temp = tg, .gpu_raw = tg_raw,
+            .cpu_load = cpu_load, .gpu_load = gpu_load, .max_load = max_load,
+            .hot = th, .average = control.average, .step = control.step,
+            .target = control.target, .duty = current, .rpm1 = r1, .rpm2 = r2
+        };
+        fan_status_publish(stdout, &status);
 
         usleep(1000 * 1000); /* 1 Hz loop */
 
     }
 
-    printf("\nStopped.\n");
+    if (isatty(STDOUT_FILENO)) putchar('\n');
+    printf("Stopped.\n");
+    fflush(stdout);
+    (void)fan_status_notify("Stopped.");
     return 0;
 }
 

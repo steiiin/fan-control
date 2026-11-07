@@ -12,7 +12,7 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 # Main executable
 add_library(fan-curve STATIC src/fan_curve.c)
 target_include_directories(fan-curve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-add_library(fan-control-core STATIC src/fan_control.c src/system_load.c)
+add_library(fan-control-core STATIC src/fan_control.c src/system_load.c src/status.c)
 target_link_libraries(fan-control-core PUBLIC fan-curve)
 add_executable(fan-control src/main.c)
 
@@ -36,6 +36,16 @@ if(BUILD_TESTING)
   add_executable(test-fan-control tests/test_fan_control.c)
   target_link_libraries(test-fan-control PRIVATE fan-control-core)
   add_test(NAME fan-control COMMAND test-fan-control)
+
+  add_executable(test-status tests/test_status.c)
+  target_link_libraries(test-status PRIVATE fan-control-core)
+  add_test(NAME status COMMAND test-status)
+  set_tests_properties(status PROPERTIES TIMEOUT 15)
+
+  add_executable(test-status-loop tests/test_status_loop.c)
+  target_link_libraries(test-status-loop PRIVATE fan-control-core m)
+  add_test(NAME status-loop COMMAND test-status-loop)
+  set_tests_properties(status-loop PROPERTIES TIMEOUT 15)
 endif()
 
 # Install rules

@@ -143,6 +143,7 @@ After=multi-user.target
 
 [Service]
 Type=simple
+NotifyAccess=main
 ExecStart=/usr/local/bin/fan-control auto
 Restart=on-failure
 User=root
@@ -156,3 +157,50 @@ To select a fixed curve, use
 `ExecStart=/usr/local/bin/fan-control power` or
 `ExecStart=/usr/local/bin/fan-control silent`. An explicit
 `ExecStart=/usr/local/bin/fan-control default` retains the original default curve.
+
+### Live service status
+
+Automatic control commands publish the latest readings to systemd once per
+control-loop iteration through `$NOTIFY_SOCKET`, without writing a status file
+or logging each sample. Keep `Type=simple` and add `NotifyAccess=main` to allow
+notifications from the main process. No additional library is required.
+
+The `Status:` line includes the configured mode, active profile, CPU/GPU
+temperatures and available utilization, requested duty, and measured fan RPM:
+
+```text
+MODE=auto PROFILE=default | CPU=52°C GPU=46°C | LOAD CPU=18.00% GPU=3.00% MAX=18.00% | HOT=52°C AVG3=51°C STEP=1 TARGET=26% | REQUESTED DUTY=27% | F1=2100 RPM F2=2050 RPM
+```
+
+Unavailable utilization appears as `N/A`; fixed modes do not query utilization.
+Invalid CPU temperatures explicitly show `FAIL-SAFE`, while untrusted GPU
+temperatures show `IGNORED`. Duty is the controller's requested percentage,
+not a hardware readback. Delivery is best-effort and nonblocking; if a
+notification is dropped, systemd retains the previous status until a later
+update arrives. Without `$NOTIFY_SOCKET`, notifications are a no-op.
+
+Interactive terminals still show an updating line. When stdout is redirected
+(including to the journal), periodic readings are suppressed; startup,
+shutdown, and error messages remain ordinary lines. Historical blob entries
+already in the journal are unaffected.
+
+After building and installing the updated application and editing your unit,
+reload and restart it. Replace `fan-control.service` below with your actual
+unit name (for example, `steiiin-fan-control.service`):
+
+```sh
+cmake -S . -B /tmp/fan-control-build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build /tmp/fan-control-build -j
+ctest --test-dir /tmp/fan-control-build --output-on-failure
+sudo cmake --install /tmp/fan-control-build
+sudo systemctl daemon-reload
+sudo systemctl restart fan-control.service
+systemctl status fan-control.service --no-pager --full
+```
+
+To read just the latest status, or refresh it every second:
+
+```sh
+systemctl show fan-control.service -p StatusText --value
+watch -n 1 'systemctl show fan-control.service -p StatusText --value'
+```
