@@ -39,7 +39,7 @@ Commands:
   power           Automatic: 40% minimum, 100% target at 80°C
   default         Automatic: original curve, 100% target at 85°C
   silent          Automatic: 20% through 50°C, 100% target at 90°C
-  auto            Select power/default/silent from mean CPU/GPU load
+  auto            Select power/default/silent from highest CPU/GPU load
 ```
 
 Automatic modes synchronize both fans using a rolling average of the last
@@ -54,15 +54,15 @@ Use `sudo fan-control default` to retain the fixed default curve.
 ### Load-based AUTO selection
 
 AUTO reads CPU and GPU utilization approximately once per second and uses
-their arithmetic mean, `(CPU% + GPU%) / 2`, without further smoothing:
+the higher reading, `max(CPU%, GPU%)`, without further smoothing:
 
-| Average load | Selected curve |
+| Highest load | Selected curve |
 |---|---|
 | Above 90% | power |
 | Below 40% | silent |
 | 40% through 90%, inclusive | default |
 
-For example, CPU at 100% and GPU at 0% averages to 50%, selecting default.
+For example, CPU at 100% and GPU at 0% gives a load of 100%, selecting power.
 Comparisons use unrounded readings. There is no hysteresis or minimum time
 between profile changes. If only one reading is available, AUTO uses that
 reading; if neither is available, it selects default. A valid 0% reading
@@ -81,7 +81,7 @@ AUTO starts both fans at 40%. Each selected profile still uses the temperature
 curves, rolling temperature average, and duty ramp below. Switching profiles
 preserves temperature history and current duty; entering power enforces its
 40% minimum immediately. Invalid CPU temperature still requests 100% duty.
-The status line shows CPU/GPU load, their mean, and the active profile.
+The status line shows CPU/GPU load, their maximum (`MAX`), and the active profile.
 
 ### Temperature curves
 

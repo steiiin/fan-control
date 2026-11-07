@@ -18,17 +18,17 @@ static int valid_load(double value) {
     return isfinite(value) && value >= 0 && value <= 100;
 }
 
-double system_load_average(double cpu, double gpu) {
-    if (valid_load(cpu) && valid_load(gpu)) return (cpu + gpu) / 2.0;
+double system_load_max(double cpu, double gpu) {
+    if (valid_load(cpu) && valid_load(gpu)) return cpu > gpu ? cpu : gpu;
     if (valid_load(cpu)) return cpu;
     if (valid_load(gpu)) return gpu;
     return -1;
 }
 
-fan_mode fan_mode_from_load(double average) {
-    if (!valid_load(average)) return FAN_MODE_DEFAULT;
-    if (average > 90) return FAN_MODE_POWER;
-    if (average < 40) return FAN_MODE_SILENT;
+fan_mode fan_mode_from_load(double load) {
+    if (!valid_load(load)) return FAN_MODE_DEFAULT;
+    if (load > 90) return FAN_MODE_POWER;
+    if (load < 40) return FAN_MODE_SILENT;
     return FAN_MODE_DEFAULT;
 }
 

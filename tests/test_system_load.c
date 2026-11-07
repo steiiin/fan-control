@@ -53,21 +53,27 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    const struct { double cpu, gpu, average; fan_mode mode; } cases[] = {
+    const struct { double cpu, gpu, maximum; fan_mode mode; } cases[] = {
         {0, 0, 0, FAN_MODE_SILENT}, {100, 100, 100, FAN_MODE_POWER},
-        {100, 0, 50, FAN_MODE_DEFAULT}, {39, 40, 39.5, FAN_MODE_SILENT},
+        {100, 0, 100, FAN_MODE_POWER}, {0, 100, 100, FAN_MODE_POWER},
+        {39, 40, 40, FAN_MODE_DEFAULT}, {40, 39, 40, FAN_MODE_DEFAULT},
         {40, 40, 40, FAN_MODE_DEFAULT}, {90, 90, 90, FAN_MODE_DEFAULT},
-        {90, 91, 90.5, FAN_MODE_POWER}, {39.99, 39.99, 39.99, FAN_MODE_SILENT},
+        {90, 0, 90, FAN_MODE_DEFAULT}, {0, 90, 90, FAN_MODE_DEFAULT},
+        {90, 91, 91, FAN_MODE_POWER}, {39.99, 39.99, 39.99, FAN_MODE_SILENT},
+        {39.99, 0, 39.99, FAN_MODE_SILENT}, {0, 39.99, 39.99, FAN_MODE_SILENT},
+        {90.01, 0, 90.01, FAN_MODE_POWER}, {0, 90.01, 90.01, FAN_MODE_POWER},
         {90.01, 90.01, 90.01, FAN_MODE_POWER},
         {-1, 95, 95, FAN_MODE_POWER}, {10, -1, 10, FAN_MODE_SILENT},
         {-1, 0, 0, FAN_MODE_SILENT}, {0, -1, 0, FAN_MODE_SILENT},
         {-1, -1, -1, FAN_MODE_DEFAULT}, {NAN, 60, 60, FAN_MODE_DEFAULT},
-        {101, 100, 100, FAN_MODE_POWER}, {INFINITY, NAN, -1, FAN_MODE_DEFAULT}
+        {60, NAN, 60, FAN_MODE_DEFAULT},
+        {101, 100, 100, FAN_MODE_POWER}, {100, 101, 100, FAN_MODE_POWER},
+        {INFINITY, NAN, -1, FAN_MODE_DEFAULT}
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        double mean = system_load_average(cases[i].cpu, cases[i].gpu);
-        CHECK(fabs(mean - cases[i].average) < 1e-9);
-        CHECK(fan_mode_from_load(mean) == cases[i].mode);
+        double maximum = system_load_max(cases[i].cpu, cases[i].gpu);
+        CHECK(fabs(maximum - cases[i].maximum) < 1e-9);
+        CHECK(fan_mode_from_load(maximum) == cases[i].mode);
     }
     CHECK(fan_mode_from_load(NAN) == FAN_MODE_DEFAULT);
     CHECK(fan_mode_from_load(101) == FAN_MODE_DEFAULT);

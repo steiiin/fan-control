@@ -17,7 +17,8 @@ double gpu_load_from_text(const char *text);
 double gpu_load_command(const char *path, char *const argv[]);
 double gpu_load_sysfs(const char *drm_root);
 double gpu_load_read(void);
-double system_load_average(double cpu, double gpu);
-fan_mode fan_mode_from_load(double average);
+/* Highest valid utilization, or -1 if both readings are unavailable. */
+double system_load_max(double cpu, double gpu);
+fan_mode fan_mode_from_load(double load);
 
 #endif

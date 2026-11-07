@@ -57,5 +57,13 @@ int main(void) {
     state.duty = 69;
     fan_control_update(&state, FAN_MODE_DEFAULT, 80);
     CHECK(state.duty == 70); /* Do not overshoot a target closer than one step. */
+
+    /* A fully loaded CPU selects power even when the GPU is idle. */
+    fan_mode profile = fan_mode_from_load(system_load_max(100, 0));
+    CHECK(profile == FAN_MODE_POWER);
+    fan_control_init(&state, FAN_MODE_AUTO);
+    fan_control_update(&state, profile, 80);
+    CHECK(state.target == 100); /* Default would target only 70% at 80°C. */
+    CHECK(state.average == 80 && state.step == 4 && state.duty == 44);
     return EXIT_SUCCESS;
 }
