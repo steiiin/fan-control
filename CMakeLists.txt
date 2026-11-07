@@ -12,10 +12,12 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 # Main executable
 add_library(fan-curve STATIC src/fan_curve.c)
 target_include_directories(fan-curve PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_library(fan-control-core STATIC src/fan_control.c src/system_load.c)
+target_link_libraries(fan-control-core PUBLIC fan-curve)
 add_executable(fan-control src/main.c)
 
 # Link libm the modern CMake way (instead of stuffing -lm into C flags)
-target_link_libraries(fan-control PRIVATE fan-curve m)
+target_link_libraries(fan-control PRIVATE fan-control-core m)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -24,8 +26,16 @@ if(BUILD_TESTING)
   add_test(NAME fan-curve COMMAND test-fan-curve)
 
   add_executable(test-cli tests/test_cli.c)
-  target_link_libraries(test-cli PRIVATE fan-curve m)
+  target_link_libraries(test-cli PRIVATE fan-control-core m)
   add_test(NAME cli COMMAND test-cli)
+
+  add_executable(test-system-load tests/test_system_load.c)
+  target_link_libraries(test-system-load PRIVATE fan-control-core m)
+  add_test(NAME system-load COMMAND test-system-load)
+
+  add_executable(test-fan-control tests/test_fan_control.c)
+  target_link_libraries(test-fan-control PRIVATE fan-control-core)
+  add_test(NAME fan-control COMMAND test-fan-control)
 endif()
 
 # Install rules

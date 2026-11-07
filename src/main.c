@@ -9,7 +9,7 @@
  *   power           - Automatic control: 40% minimum, 100% target at 80°C
  *   default         - Automatic control: original curve, 100% target at 85°C
  *   silent          - Automatic control: 20% through 50°C, 100% target at 90°C
- *   auto            - Alias for default; both fans follow averaged hotter temp
+ *   auto            - Select power/default/silent from CPU/GPU utilization
  *
  * DISCLAIMER: Direct EC access can be risky. You assume responsibility.
 
@@ -28,6 +28,8 @@
 #include <unistd.h>
 
 #include "fan_curve.h"
+#include "fan_control.h"
+#include "system_load.h"
 
 /* --- Program name --- */
 #define NAME "fan-control"
@@ -80,7 +82,6 @@ static int   cmd_set1(int pct);
 static int   cmd_set2(int pct);
 static int   cmd_auto(fan_mode mode);
 
-static int   step_from_avg_temp(int t_avg_c);
 static int   clamp(int v, int lo, int hi);
 static int   rpm_from_raw(int hi, int lo);
 static int   path_exists(const char *path);
@@ -104,7 +105,7 @@ int main(int argc, char *argv[]) {
             "  power           Automatic: 40%% minimum, 100%% target at 80°C\n"
             "  default         Automatic: original curve, 100%% target at 85°C\n"
             "  silent          Automatic: 20%% through 50°C, 100%% target at 90°C\n"
-            "  auto            Alias for default\n"
+            "  auto            Select power (>90%%), silent (<40%%), otherwise default by mean CPU/GPU load\n"
             "Automatic modes synchronize both fans using the averaged hotter CPU/GPU temperature.\n",
             NAME);
         return EXIT_FAILURE;
@@ -210,22 +211,24 @@ static int cmd_set2(int pct) {
     return dump_status();
 }
 
-static int step_from_avg_temp(int t_avg_c) {
-    if (t_avg_c < 70) return 1;
-    if (t_avg_c < 80) return 2;
-    return 4;
+static void print_load_status(double cpu, double gpu, double average, fan_mode profile) {
+    char cpu_text[32] = "N/A", gpu_text[32] = "N/A", average_text[32] = "N/A";
+    if (cpu >= 0) snprintf(cpu_text, sizeof(cpu_text), "%.2f%%", cpu);
+    if (gpu >= 0) snprintf(gpu_text, sizeof(gpu_text), "%.2f%%", gpu);
+    if (average >= 0) snprintf(average_text, sizeof(average_text), "%.2f%%", average);
+    printf("LOAD CPU=%s GPU=%s MEAN=%s PROFILE=%s  ",
+           cpu_text, gpu_text, average_text, fan_mode_name(profile));
 }
 
 
 static int cmd_auto(fan_mode mode) {
 
-    /* ring buffer of last 3 "hot" temps (hotter-of CPU/GPU), initialized lazily */
-    int ring[3] = { -1, -1, -1 };
-    int idx = 0, filled = 0;
-
     /* Start at the selected mode's duty and sync both fans. */
-    int current = fan_mode_startup_duty(mode);
-    int minimum = fan_mode_min_duty(mode);
+    fan_control_state control;
+    fan_control_init(&control, mode);
+    int current = control.duty;
+    cpu_load_state cpu_state = {0};
+    fan_mode profile = mode == FAN_MODE_AUTO ? FAN_MODE_DEFAULT : mode;
     fan1_duty_write(current);
     fan2_duty_write(current);
 
@@ -235,13 +238,24 @@ static int cmd_auto(fan_mode mode) {
 
         int tc = cpu_temp();
         int tg_raw = gpu_temp();
+        double cpu_load = -1, gpu_load = -1, average_load = -1;
 
         /* Safety: if CPU temp implausible, full fan speed */
         if (!is_temp_plausible(tc)) {
+            fan_control_update(&control, profile, -1);
             if (current != 100) {
                 fan1_duty_write(100);
                 fan2_duty_write(100);
                 current = 100;
+            }
+
+            /* Apply the temperature fail-safe before querying load. */
+            if (mode == FAN_MODE_AUTO) {
+                cpu_load = cpu_load_read(&cpu_state);
+                gpu_load = gpu_load_read();
+                average_load = system_load_average(cpu_load, gpu_load);
+                profile = fan_mode_from_load(average_load);
+                print_load_status(cpu_load, gpu_load, average_load, profile);
             }
 
             int r1s = fan1_rpm_read();
@@ -257,30 +271,18 @@ static int cmd_auto(fan_mode mode) {
         int tg = sanitize_gpu_temp(tg_raw, tc);
         int th = (tg >= 0) ? ((tc > tg) ? tc : tg) : tc;
 
-        /* update ring buffer for 3-second floating average */
-        ring[idx] = th;
-        idx = (idx + 1) % 3;
-        if (filled < 3) filled++;
-
-        /* compute average over available samples (1..3) */
-        int sum = 0;
-        for (int i = 0; i < filled; i++) sum += ring[i];
-        int t_avg = sum / filled;
-
-        /* step and target from averaged temp */
-        int step = step_from_avg_temp(t_avg);
-        int target = target_duty_from_avg_temp(mode, t_avg);
-
-        /* change fan speed, except diff(target/current) < step */
-        int diff = target - current;
-        int newduty = current;
-        if (diff>0) {
-            newduty = (diff >= step) ? current + step : target;
+        if (mode == FAN_MODE_AUTO) {
+            cpu_load = cpu_load_read(&cpu_state);
+            gpu_load = gpu_load_read();
+            average_load = system_load_average(cpu_load, gpu_load);
+            profile = fan_mode_from_load(average_load);
         }
-        else if (diff<0) {
-            newduty = current - 1;
-        }
-        newduty = clamp(newduty, minimum, 100);
+
+        fan_control_update(&control, profile, th);
+        int t_avg = control.average;
+        int step = control.step;
+        int target = control.target;
+        int newduty = control.duty;
 
         if (newduty != current) {
             fan1_duty_write(newduty);
@@ -291,6 +293,8 @@ static int cmd_auto(fan_mode mode) {
         int r1 = fan1_rpm_read();
         int r2 = fan2_rpm_read();
 
+        if (mode == FAN_MODE_AUTO)
+            print_load_status(cpu_load, gpu_load, average_load, profile);
         if (tg >= 0) {
             printf("CPU=%d°C  GPU=%d°C  HOT=%d°C  AVG3=%d°C  STEP=%d  TARGET=%d%%  -> Duty=%d%%  (F1=%d RPM, F2=%d RPM)    \r",
                    tc, tg, th, t_avg, step, target, current, r1, r2);

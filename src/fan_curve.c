@@ -3,7 +3,9 @@
 #include <string.h>
 
 int fan_mode_from_command(const char *command, fan_mode *mode) {
-    if (strcmp(command, "default") == 0 || strcmp(command, "auto") == 0)
+    if (strcmp(command, "auto") == 0)
+        *mode = FAN_MODE_AUTO;
+    else if (strcmp(command, "default") == 0)
         *mode = FAN_MODE_DEFAULT;
     else if (strcmp(command, "power") == 0)
         *mode = FAN_MODE_POWER;
@@ -16,6 +18,7 @@ int fan_mode_from_command(const char *command, fan_mode *mode) {
 
 const char *fan_mode_name(fan_mode mode) {
     switch (mode) {
+    case FAN_MODE_AUTO: return "auto";
     case FAN_MODE_POWER: return "power";
     case FAN_MODE_SILENT: return "silent";
     default: return "default";
@@ -60,7 +63,7 @@ static int default_target_duty(int temp_c) {
 }
 
 int target_duty_from_avg_temp(fan_mode mode, int temp_c) {
-    if (mode == FAN_MODE_DEFAULT)
+    if (mode == FAN_MODE_DEFAULT || mode == FAN_MODE_AUTO)
         return default_target_duty(temp_c);
 
     int idle_c = mode == FAN_MODE_POWER ? 40 : 50;

@@ -39,7 +39,7 @@ Commands:
   power           Automatic: 40% minimum, 100% target at 80°C
   default         Automatic: original curve, 100% target at 85°C
   silent          Automatic: 20% through 50°C, 100% target at 90°C
-  auto            Alias for default
+  auto            Select power/default/silent from mean CPU/GPU load
 ```
 
 Automatic modes synchronize both fans using a rolling average of the last
@@ -48,7 +48,40 @@ are ignored; an invalid CPU reading immediately requests 100% duty in every mode
 
 Choose a mode with `sudo fan-control power`, `sudo fan-control default`, or
 `sudo fan-control silent`. These commands take no additional arguments.
-Existing `sudo fan-control auto` commands retain the default behavior.
+Use `sudo fan-control auto` to select the temperature curve from system load.
+Use `sudo fan-control default` to retain the fixed default curve.
+
+### Load-based AUTO selection
+
+AUTO reads CPU and GPU utilization approximately once per second and uses
+their arithmetic mean, `(CPU% + GPU%) / 2`, without further smoothing:
+
+| Average load | Selected curve |
+|---|---|
+| Above 90% | power |
+| Below 40% | silent |
+| 40% through 90%, inclusive | default |
+
+For example, CPU at 100% and GPU at 0% averages to 50%, selecting default.
+Comparisons use unrounded readings. There is no hysteresis or minimum time
+between profile changes. If only one reading is available, AUTO uses that
+reading; if neither is available, it selects default. A valid 0% reading
+counts as available.
+
+CPU utilization is calculated from successive `/proc/stat` counters across
+all cores, treating idle and I/O wait as inactive. Its first reading establishes
+a baseline and is unavailable for selection. GPU utilization comes from
+`nvidia-smi` with a 500 ms query timeout, falling back to DRM device
+`gpu_busy_percent` files where supported. The highest valid GPU percentage
+from the selected source is used. Missing or invalid readings appear as `N/A`.
+No additional library is required; explicit power/default/silent modes do not
+query utilization.
+
+AUTO starts both fans at 40%. Each selected profile still uses the temperature
+curves, rolling temperature average, and duty ramp below. Switching profiles
+preserves temperature history and current duty; entering power enforces its
+40% minimum immediately. Invalid CPU temperature still requests 100% duty.
+The status line shows CPU/GPU load, their mean, and the active profile.
 
 ### Temperature curves
 
@@ -85,8 +118,9 @@ never fall below 20% during automatic operation.
 
 ### Tests
 
-The tests cover the curves, default compatibility, mode selection, and CLI
-validation without accessing fan hardware or requiring root:
+The tests cover the curves, default compatibility, mode selection, CLI
+validation, utilization parsing, subprocess failures/timeouts, and controller
+state across profile changes without accessing fan hardware or requiring root:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
@@ -117,7 +151,8 @@ User=root
 WantedBy=multi-user.target
 ```
 
-The example retains the original default mode. To select another mode, use
+The example selects the temperature curve dynamically from CPU/GPU load.
+To select a fixed curve, use
 `ExecStart=/usr/local/bin/fan-control power` or
 `ExecStart=/usr/local/bin/fan-control silent`. An explicit
-`ExecStart=/usr/local/bin/fan-control default` is equivalent to `auto`.
+`ExecStart=/usr/local/bin/fan-control default` retains the original default curve.

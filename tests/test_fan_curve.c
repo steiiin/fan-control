@@ -76,7 +76,7 @@ int main(void) {
     }
 
     const struct { const char *command; fan_mode mode; const char *name; } commands[] = {
-        {"auto", FAN_MODE_DEFAULT, "default"},
+        {"auto", FAN_MODE_AUTO, "auto"},
         {"default", FAN_MODE_DEFAULT, "default"},
         {"power", FAN_MODE_POWER, "power"},
         {"silent", FAN_MODE_SILENT, "silent"}

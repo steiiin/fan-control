@@ -4,7 +4,8 @@
 typedef enum {
     FAN_MODE_DEFAULT,
     FAN_MODE_POWER,
-    FAN_MODE_SILENT
+    FAN_MODE_SILENT,
+    FAN_MODE_AUTO
 } fan_mode;
 
 /* Returns 1 for an automatic command (including auto), otherwise 0. */
